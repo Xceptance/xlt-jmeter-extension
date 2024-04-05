@@ -1,9 +1,9 @@
 package com.xceptance.loadtest.jmeter.tests;
 
-import com.xceptance.loadtest.api.data.CustomJMeterEngine;
 import com.xceptance.loadtest.api.data.DataFileProvider;
 import com.xceptance.loadtest.api.data.NonSiteRelatedTest;
 import com.xceptance.loadtest.api.tests.JMeterTestCase;
+import org.apache.jmeter.engine.StandardJMeterEngine;
 import org.apache.jmeter.save.SaveService;
 import org.apache.jmeter.util.JMeterUtils;
 import org.apache.jorphan.collections.HashTree;
@@ -15,7 +15,8 @@ import java.util.Optional;
 
 public class TJmeterNative extends JMeterTestCase implements NonSiteRelatedTest
 {
-    private HashTree tree;
+    private HashTree testTree;
+
     private String fileName;
     
     public TJmeterNative()
@@ -30,8 +31,8 @@ public class TJmeterNative extends JMeterTestCase implements NonSiteRelatedTest
             Optional<File> testPlan = DataFileProvider.dataFile(fileName);
             Assert.assertTrue("The "+ fileName +" file could not be found.", testPlan.isPresent());
             
-            // load the jmx file into a HashTree structure
-            tree = SaveService.loadTree(testPlan.get());
+            // Load the jmx file into a HashTree structure
+            testTree = SaveService.loadTree(testPlan.get());
         } 
         catch (Throwable e)
         {
@@ -40,7 +41,7 @@ public class TJmeterNative extends JMeterTestCase implements NonSiteRelatedTest
             throw ae;
         }
         
-        // remove file ending for naming 
+        // Remove file ending for naming
         setTestName(getTestName() + "_" + fileName.replace(".jmx", ""));
     }
     
@@ -53,10 +54,10 @@ public class TJmeterNative extends JMeterTestCase implements NonSiteRelatedTest
     public void test() throws Throwable
     {
         JMeterUtils.initLocale();
-        CustomJMeterEngine jmeter = new CustomJMeterEngine();
-//        StandardJMeterEngine jmeter = new StandardJMeterEngine();
-        
-        jmeter.configure(tree);
+        // CustomJMeterEngine jmeter = new CustomJMeterEngine();
+        StandardJMeterEngine jmeter = new StandardJMeterEngine();
+
+        jmeter.configure(testTree);
         jmeter.run();
     }
 }

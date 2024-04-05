@@ -1,15 +1,8 @@
 package com.xceptance.loadtest.api.data;
 
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CopyOnWriteArrayList;
-
+import com.xceptance.loadtest.api.util.Actions;
+import com.xceptance.xlt.engine.httprequest.HttpRequest;
+import com.xceptance.xlt.engine.httprequest.HttpResponse;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.jmeter.config.Arguments;
@@ -37,17 +30,8 @@ import org.apache.jmeter.testelement.TestElement;
 import org.apache.jmeter.testelement.TestIterationListener;
 import org.apache.jmeter.testelement.TestStateListener;
 import org.apache.jmeter.testelement.property.CollectionProperty;
-import org.apache.jmeter.threads.AbstractThreadGroup;
-import org.apache.jmeter.threads.FindTestElementsUpToRootTraverser;
-import org.apache.jmeter.threads.JMeterContext;
+import org.apache.jmeter.threads.*;
 import org.apache.jmeter.threads.JMeterContext.TestLogicalAction;
-import org.apache.jmeter.threads.JMeterContextService;
-import org.apache.jmeter.threads.JMeterVariables;
-import org.apache.jmeter.threads.ListenerNotifier;
-import org.apache.jmeter.threads.PostThreadGroup;
-import org.apache.jmeter.threads.SamplePackage;
-import org.apache.jmeter.threads.SetupThreadGroup;
-import org.apache.jmeter.threads.TestCompiler;
 import org.apache.jmeter.util.JMeterUtils;
 import org.apache.jorphan.collections.HashTree;
 import org.apache.jorphan.collections.ListedHashTree;
@@ -57,39 +41,40 @@ import org.apiguardian.api.API;
 import org.htmlunit.HttpMethod;
 import org.junit.Assert;
 
-import com.xceptance.loadtest.api.util.Actions;
-import com.xceptance.xlt.engine.httprequest.HttpRequest;
-import com.xceptance.xlt.engine.httprequest.HttpResponse;
+import java.net.URL;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class CustomJMeterEngine extends StandardJMeterEngine
 {
-    private boolean running;
-    private HashTree test;
-    private static final List<TestStateListener> testList = new ArrayList<>();
-    private final List<AbstractThreadGroup> groups = new CopyOnWriteArrayList<>();
-    private boolean tearDownOnShutdown;
-    public JMeterVariables threadVars;
-    private TestCompiler compiler;
-    public static final String LAST_SAMPLE_OK = "JMeterThread.last_sample_ok"; // $NON-NLS-1$
-    static final String VAR_IS_SAME_USER_KEY = "__jmv_SAME_USER";
-    public static final String PACKAGE_OBJECT = "JMeterThread.pack"; // $NON-NLS-1$
-    
+
     private static final String TRUE = Boolean.toString(true); // i.e. "true"
-    
-    private String jmeterVariable = "${%s}";
-    
-    private CustomJMeterEngine engine = null; // For access to stop methods.
-    private Controller mainController;
+    private static final List<TestStateListener> testList = new ArrayList<>();
+
     private final boolean isSameUserOnNextIteration = true;
-    private Collection<TestIterationListener> testIterationStartListeners;
-    private Map<String, String> variableMap;
-    private List<SampleListener> sampleListeners;
-    private Sampler sam;
-    private FindTestElementsUpToRootTraverser pathToRootTraverser;
-    private List<Controller> controllersToRoot;
-    private Controller controller;
-    private String name;
+    private boolean running;
+    private boolean tearDownOnShutdown;
     private int index;
+    private final List<AbstractThreadGroup> groups = new CopyOnWriteArrayList<>();
+    private Collection<TestIterationListener> testIterationStartListeners;
+    private Controller mainController;
+    private Controller controller;
+    private List<Controller> controllersToRoot;
+    private CustomJMeterEngine engine = null; // For access to stop methods.
+    private FindTestElementsUpToRootTraverser pathToRootTraverser;
+    private HashTree test;
+    private Sampler sampler;
+    private List<SampleListener> sampleListeners;
+    private String name;
+    private String jmeterVariable = "${%s}";
+    private Map<String, String> variableMap;
+    private TestCompiler compiler;
+
+    public JMeterVariables threadVars;
+    public static final String LAST_SAMPLE_OK = "JMeterThread.last_sample_ok"; // $NON-NLS-1$
+    public static final String PACKAGE_OBJECT = "JMeterThread.pack"; // $NON-NLS-1$
+    public static final String VAR_IS_SAME_USER_KEY = "__jmv_SAME_USER";
+
     
     @Override
     public void configure(HashTree testTree)
@@ -101,7 +86,8 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         threadVars = new JMeterVariables();
     }       
     
-    public void setEngine(CustomJMeterEngine engine) {
+    public void setEngine(CustomJMeterEngine engine)
+    {
         this.engine = engine;
     }
     
@@ -110,13 +96,11 @@ public class CustomJMeterEngine extends StandardJMeterEngine
     {
         running = true;
         
-        /*
-         * Ensure that the sample variables are correctly initialised for each run.
-         */
+        // Ensure that the sample variables are correctly initialised for each run.
         SampleEvent.initSampleVariables();
         JMeterContextService.startTest();
         
-        // needed for engine
+        // Needed for engine
         SearchByClass<TestIterationListener> threadListenerSearcher = new SearchByClass<>(TestIterationListener.class);
         testIterationStartListeners = threadListenerSearcher.getSearchResults();
         
@@ -125,11 +109,15 @@ public class CustomJMeterEngine extends StandardJMeterEngine
             PreCompiler compiler = new PreCompiler();
             test.traverse(compiler);
         }
-        catch 
-        (RuntimeException e) 
+        catch (RuntimeException e)
         {
+            // No point continuing
             JMeterUtils.reportErrorToUser("Error occurred compiling the tree: - see log file", e);
-            return; // no point continuing
+
+            // Make the error visible for our application
+            AssertionError ae = new AssertionError(e.getMessage());
+            ae.setStackTrace(e.getStackTrace());
+            throw ae;
         }
         
         /*
@@ -139,10 +127,9 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         SearchByClass<TestStateListener> testListeners = new SearchByClass<>(TestStateListener.class);
         test.traverse(testListeners);
         
-        // Merge in any additional test listeners
-        // currently only used by the function parser
+        // Merge in any additional test listeners – currently only used by the function parser
         testListeners.getSearchResults().addAll(testList);
-        testList.clear(); // no longer needed
+        testList.clear();
 
         test.traverse(new TurnElementsOn());
 //        notifyTestListenersOfStart(testListeners);
@@ -159,10 +146,7 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         test.traverse(postSearcher);
 
         TestCompiler.initialize();
-        // for each thread group, generate threads
-        // hand each thread the sampler controller
-        // and the listeners, and the timer
-        
+
         Iterator<AbstractThreadGroup> iter = searcher.getSearchResults().iterator();
 
 //        ListenerNotifier notifier = new ListenerNotifier();
@@ -183,7 +167,7 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         JMeterContextService.getContext().setSamplingStarted(true);
 
         // get the first item
-        sam = mainController.next();
+        sampler = mainController.next();
         index = 0;
         
         while (running) 
@@ -195,12 +179,12 @@ public class CustomJMeterEngine extends StandardJMeterEngine
             {
                 Actions.run(name, t ->
                 {
-                    while (running && sam != null) 
+                    while (running && sampler != null)
                     {
                         // if null the variables are not used in the context (TransactionController : notifyListeners())
                         context.setThreadGroup((AbstractThreadGroup) mainController);
                         
-                        processSampler(sam, null, context);
+                        processSampler(sampler, null, context);
                         context.cleanAfterSample();
 
                         boolean lastSampleOk = TRUE.equals(context.getVariables().get(LAST_SAMPLE_OK));
@@ -211,16 +195,16 @@ public class CustomJMeterEngine extends StandardJMeterEngine
                                 || !lastSampleOk)
                         {
                             context.setTestLogicalAction(TestLogicalAction.CONTINUE);
-                            sam = null;
+                            sampler = null;
                             // already done after the request was called
 //                            setLastSampleOk(context.getVariables(), true);
                         }
                         else 
                         {
-                            sam = mainController.next();
+                            sampler = mainController.next();
                             
                             // get the first parent controller node, for naming and action bundling
-                            if (sam != null)
+                            if (sampler != null)
                             {
                                 String newName = getParentController(groupTree, index);
                                 
@@ -257,7 +241,7 @@ public class CustomJMeterEngine extends StandardJMeterEngine
     private String getParentController(ListedHashTree groupTree, int index)
     {
         // get the first parent controller node, for naming and action bundling
-        pathToRootTraverser = new FindTestElementsUpToRootTraverser(sam);
+        pathToRootTraverser = new FindTestElementsUpToRootTraverser(sampler);
         groupTree.traverse(pathToRootTraverser);
         controllersToRoot = pathToRootTraverser.getControllersToRoot();
         
@@ -552,7 +536,7 @@ public class CustomJMeterEngine extends StandardJMeterEngine
     private IterationListener initRun(JMeterContext threadContext) 
     {
         threadVars.putObject(VAR_IS_SAME_USER_KEY, isSameUserOnNextIteration);
-        // save all previous found variables (from compiler) into the thread 
+        // Save all previous found variables (from compiler) into the thread
         threadVars.putAll(threadContext.getVariables());
         threadContext.setVariables(threadVars);
         threadContext.setThreadNum(1);
@@ -561,13 +545,9 @@ public class CustomJMeterEngine extends StandardJMeterEngine
 //        threadContext.setThreadGroup(threadGroup);
         threadContext.setEngine(engine);
         
-        // variables are set at this point
+        // Variables are set at this point
         test.traverse(compiler);
         
-//        if (scheduler) {
-//            // set the scheduler to start
-//            startScheduler();
-//        }
         /*
          * Setting SamplingStarted before the controllers are initialised allows
          * them to access the running values of functions and variables (however
@@ -579,7 +559,6 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         IterationListener iterationListener = new IterationListener();
         mainController.addIterationListener(iterationListener);
 
-//        threadStarted();
         return iterationListener;
     }
     

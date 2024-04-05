@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="off">
+  <Filters>
+    <RegexFilter regex="About to replace in property of type.*" onMatch="DENY" onMismatch="NEUTRAL"/>
+  </Filters>
   <Appenders>
     <Console name="Console" target="SYSTEM_OUT">
       <PatternLayout pattern="[%d{HH:mm:ss,SSS}] %-5p [%t] - %m%n" />
