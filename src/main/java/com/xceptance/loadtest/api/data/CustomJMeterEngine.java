@@ -42,14 +42,16 @@ import org.htmlunit.HttpMethod;
 import org.junit.Assert;
 
 import java.net.URL;
-import java.util.*;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class CustomJMeterEngine extends StandardJMeterEngine
 {
 
     private static final String TRUE = Boolean.toString(true); // i.e. "true"
-    private static final List<TestStateListener> testList = new ArrayList<>();
 
     private final boolean isSameUserOnNextIteration = true;
     private boolean running;
@@ -127,32 +129,14 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         SearchByClass<TestStateListener> testListeners = new SearchByClass<>(TestStateListener.class);
         test.traverse(testListeners);
         
-        // Merge in any additional test listeners – currently only used by the function parser
-        testListeners.getSearchResults().addAll(testList);
-        testList.clear();
-
         test.traverse(new TurnElementsOn());
 //        notifyTestListenersOfStart(testListeners);
 
-        List<?> testLevelElements = new ArrayList<>(test.list(test.getArray()[0]));
-//        removeThreadGroups(testLevelElements);
-
-        SearchByClass<SetupThreadGroup> setupSearcher = new SearchByClass<>(SetupThreadGroup.class);
-        SearchByClass<AbstractThreadGroup> searcher = new SearchByClass<>(AbstractThreadGroup.class);
-        SearchByClass<PostThreadGroup> postSearcher = new SearchByClass<>(PostThreadGroup.class);
-
-        test.traverse(setupSearcher);
-        test.traverse(searcher);
-        test.traverse(postSearcher);
-
         TestCompiler.initialize();
-
-        Iterator<AbstractThreadGroup> iter = searcher.getSearchResults().iterator();
-
-//        ListenerNotifier notifier = new ListenerNotifier();
-
         JMeterContextService.clearTotalThreads();
-        
+
+        SearchByClass<AbstractThreadGroup> searcher = new SearchByClass<>(AbstractThreadGroup.class);
+        test.traverse(searcher);
         Collection<AbstractThreadGroup> searchResults = searcher.getSearchResults();
         
         Assert.assertFalse("No usable requests in xml file found.", searchResults.isEmpty());
@@ -162,14 +146,21 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         initRun(context);
         
         // main hashtree
-        AbstractThreadGroup group = iter.next();
+        AbstractThreadGroup group = searcher.getSearchResults().iterator().next();
         ListedHashTree groupTree = (ListedHashTree) searcher.getSubTree(group);
         JMeterContextService.getContext().setSamplingStarted(true);
 
-        // get the first item
+        // Get the first item
         sampler = mainController.next();
         index = 0;
-        
+
+        // Make sure the test has data to process
+        if(sampler == null && mainController.isDone())
+        {
+            running = false;
+        }
+
+        // As long as the current test case contains JMeter test elements, grab the elements and try to run them
         while (running) 
         {
             name = getParentController(groupTree, index);
@@ -181,29 +172,26 @@ public class CustomJMeterEngine extends StandardJMeterEngine
                 {
                     while (running && sampler != null)
                     {
-                        // if null the variables are not used in the context (TransactionController : notifyListeners())
+                        // If null the variables are not used in the context (TransactionController : notifyListeners())
                         context.setThreadGroup((AbstractThreadGroup) mainController);
                         
                         processSampler(sampler, null, context);
                         context.cleanAfterSample();
 
                         boolean lastSampleOk = TRUE.equals(context.getVariables().get(LAST_SAMPLE_OK));
-                        // restart of the next loop
+                        // Restart of the next loop
                         // - was requested through threadContext
-                        // - or the last sample failed AND the onErrorStartNextLoop option is enabled
-                        if (context.getTestLogicalAction() != TestLogicalAction.CONTINUE
-                                || !lastSampleOk)
+                        // - or the last sample failed
+                        if (context.getTestLogicalAction() != TestLogicalAction.CONTINUE || !lastSampleOk)
                         {
                             context.setTestLogicalAction(TestLogicalAction.CONTINUE);
                             sampler = null;
-                            // already done after the request was called
-//                            setLastSampleOk(context.getVariables(), true);
                         }
                         else 
                         {
                             sampler = mainController.next();
                             
-                            // get the first parent controller node, for naming and action bundling
+                            // Get the first parent controller node, for naming and action bundling
                             if (sampler != null)
                             {
                                 String newName = getParentController(groupTree, index);
@@ -265,13 +253,13 @@ public class CustomJMeterEngine extends StandardJMeterEngine
     private SampleResult processSampler(Sampler current, Sampler parent, JMeterContext threadContext) 
     {
         SampleResult transactionResult = null;
-        // Check if we are running a transaction
         TransactionSampler transactionSampler = null;
         // Find the package for the transaction
         SamplePackage transactionPack = null;
         try
         {
-            if (current instanceof TransactionSampler) 
+            // Check if the current sampler represents a transaction
+            if (current instanceof TransactionSampler)
             {
                 transactionSampler = (TransactionSampler) current;
                 transactionPack = compiler.configureTransactionSampler(transactionSampler);
@@ -279,10 +267,8 @@ public class CustomJMeterEngine extends StandardJMeterEngine
                 // Check if the transaction is done
                 if (transactionSampler.isTransactionDone()) 
                 {
-                    transactionResult = doEndTransactionSampler(transactionSampler,
-                            parent,
-                            transactionPack,
-                            threadContext);
+                    transactionResult = doEndTransactionSampler(transactionSampler, parent,transactionPack,
+                                                                threadContext);
                     // Transaction is done, we do not have a sampler to sample
                     current = null;
                 } 
@@ -310,14 +296,14 @@ public class CustomJMeterEngine extends StandardJMeterEngine
                 executeSamplePackage(current, transactionSampler, transactionPack, threadContext);
             }
 
-        } catch (JMeterStopTestException e) 
+        }
+        catch (JMeterStopTestException e)
         { 
             // TODO logging and eventually actions
         }
-        if (!running
-                && transactionResult == null
-                && transactionSampler != null
-                && transactionPack != null) {
+
+        if (!running && transactionResult == null && transactionSampler != null && transactionPack != null)
+        {
             transactionResult = doEndTransactionSampler(transactionSampler, parent, transactionPack, threadContext);
         }
 
@@ -362,54 +348,55 @@ public class CustomJMeterEngine extends StandardJMeterEngine
             {
                 e.printStackTrace();
             }
-        }
-        // If we got any results, then perform processing on the result
-        if (result != null) 
-        {
-            if (!result.isIgnore()) 
+
+            // If we got any results, then perform processing on the result
+            if (result != null)
             {
-                int nbActiveThreadsInThreadGroup = 1;
-                int nbTotalActiveThreads = JMeterContextService.getNumberOfThreads();
-                fillThreadInformation(result, nbActiveThreadsInThreadGroup, nbTotalActiveThreads);
-                SampleResult[] subResults = result.getSubResults();
-                if (subResults != null) {
-                    for (SampleResult subResult : subResults) 
+                if (!result.isIgnore())
+                {
+                    int nbActiveThreadsInThreadGroup = 1;
+                    int nbTotalActiveThreads = JMeterContextService.getNumberOfThreads();
+                    fillThreadInformation(result, nbActiveThreadsInThreadGroup, nbTotalActiveThreads);
+                    SampleResult[] subResults = result.getSubResults();
+                    if (subResults != null) {
+                        for (SampleResult subResult : subResults)
+                        {
+                            fillThreadInformation(subResult, nbActiveThreadsInThreadGroup, nbTotalActiveThreads);
+                        }
+                    }
+                    threadContext.setPreviousResult(result);
+                    runPostProcessors(pack.getPostProcessors());
+                    compiler.done(pack);
+                    // Add the result as subsample of transaction if we are in a transaction
+                    if (transactionSampler != null && !result.isIgnore())
                     {
-                        fillThreadInformation(subResult, nbActiveThreadsInThreadGroup, nbTotalActiveThreads);
+                        transactionSampler.addSubSamplerResult(result);
                     }
                 }
-                threadContext.setPreviousResult(result);
-                runPostProcessors(pack.getPostProcessors());
-                compiler.done(pack);
-                // Add the result as subsample of transaction if we are in a transaction
-                if (transactionSampler != null && !result.isIgnore()) 
+                else
                 {
-                    transactionSampler.addSubSamplerResult(result);
+                    // This call is done by checkAssertions() , as we don't call it
+                    // for isIgnore, we explictely call it here
+                    setLastSampleOk(threadContext.getVariables(), result.isSuccessful());
+                    compiler.done(pack);
                 }
-            } 
-            else 
-            {
-                // This call is done by checkAssertions() , as we don't call it
-                // for isIgnore, we explictely call it here
-                setLastSampleOk(threadContext.getVariables(), result.isSuccessful());
-                compiler.done(pack);
+                if (result.getTestLogicalAction() != TestLogicalAction.CONTINUE)
+                {
+                    threadContext.setTestLogicalAction(result.getTestLogicalAction());
+                }
             }
-            if (result.getTestLogicalAction() != TestLogicalAction.CONTINUE) 
+            else
             {
-                threadContext.setTestLogicalAction(result.getTestLogicalAction());
+                compiler.done(pack); // Finish up
             }
-        } 
-        else 
-        {
-            compiler.done(pack); // Finish up
         }
     }
     
     public void buildAndExecuteRequest(SamplePackage data, String requestName) throws Throwable
     {
         HTTPSamplerProxy sampler = (HTTPSamplerProxy) data.getSampler();
-        HeaderManager hm = null;
-        AuthManager am = null;
+        HeaderManager headerManager = null;
+        AuthManager authManager = null;
         
         List<ConfigTestElement> configs = data.getConfigs();
 
@@ -417,35 +404,34 @@ public class CustomJMeterEngine extends StandardJMeterEngine
         {
             if (element instanceof HeaderManager)
             {
-                hm = (HeaderManager) element;
+                headerManager = (HeaderManager) element;
             }
             if (element instanceof AuthManager)
             {
-                am = (AuthManager) element;
+                authManager = (AuthManager) element;
             }
         }
         
         String method = sampler.getMethod();
         String baseUrl = data.getSampler().toString();
         
-        HttpRequest request = new HttpRequest()
-                .timerName(requestName)
-                .baseUrl(baseUrl)
-                .method(HttpMethod.valueOf(method));
+        HttpRequest request = new HttpRequest().timerName(requestName)
+                                               .baseUrl(baseUrl)
+                                               .method(HttpMethod.valueOf(method));
         
-        if (am != null)
+        if (authManager != null)
         {
-            Authorization authForURL = am.getAuthForURL(new URL(baseUrl));
+            Authorization authForURL = authManager.getAuthForURL(new URL(baseUrl));
             if (authForURL != null)
             {
                 setBasicAuthenticationHeader(request, authForURL.getUser(), authForURL.getPass());
             }
         }
         
-        if (hm != null)
+        if (headerManager != null)
         {
-            // add header data
-            addHeaderData(request, hm);
+            // Add header data
+            addHeaderData(request, headerManager);
         }
         
         addArgumentData(request, sampler);
@@ -492,27 +478,12 @@ public class CustomJMeterEngine extends StandardJMeterEngine
     
     private HttpRequest addHeaderData(HttpRequest request, HeaderManager headerData)
     {
-        // transform header keys/values from loaded data to request confirm data
+        // Transform header keys/values from loaded data to request confirm data
         CollectionProperty headers = headerData.getHeaders();
         headers.forEach(p -> 
         {
-            // remove name from the combined value attribute
-            request.header(p.getName(), p.getStringValue().replace(p.getName(), "")); 
-            
-//            Set<String> keySet = variableMap.keySet();
-//            keySet.forEach(k ->
-//            {
-//               if (p.getStringValue().contains(k))
-//               {
-//                   // remove name from the combined value attribute
-//                   String preRefinedString = p.getStringValue().replace(p.getName(), ""); 
-//                   // replace and add jmeter variables
-//                   String replace = StringUtils.replaceOnceIgnoreCase(preRefinedString, 
-//                                                                      String.format(jmeterVariable, k),
-//                                                                      variableMap.get(k));
-//                   request.header(p.getName(), replace);
-//               }
-//            });
+            // Remove name from the combined value attribute
+            request.header(p.getName(), StringUtils.replaceOnce(p.getStringValue(), p.getName(), ""));
         });
         return request;
     }
